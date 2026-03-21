@@ -1,96 +1,92 @@
 """
-AI Daily News Report Generator
-Claude API (web_search tool) でニュース収集 → LINE通知
+AI Daily News Report Generator v2
+Claude API -> JSON -> HTML report (GitHub Pages) + LINE summary
 """
 
-import os
-import json
-import datetime
-import requests
+import os, json, datetime, requests, re
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 LINE_CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
 LINE_USER_ID = os.environ["LINE_USER_ID"]
+GITHUB_PAGES_BASE = os.environ.get("GITHUB_PAGES_BASE", "")
 
 JST = datetime.timezone(datetime.timedelta(hours=9))
-TODAY = datetime.datetime.now(JST).strftime("%Y年%m月%d日")
-WEEKDAY = ["月", "火", "水", "木", "金", "土", "日"][datetime.datetime.now(JST).weekday()]
+NOW = datetime.datetime.now(JST)
+TODAY = NOW.strftime("%Y-%m-%d")
+TODAY_JP = NOW.strftime("%Y年%m月%d日")
+WEEKDAY = ["月","火","水","木","金","土","日"][NOW.weekday()]
 
-def generate_report() -> str:
-    prompt = f"""
-あなたはAI業界専門のリサーチャーです。
-今日（{TODAY}・{WEEKDAY}曜日）時点の最新情報を web_search で調査して、
-以下の3カテゴリに分けた日本語の朝刊レポートを作成してください。
+def fetch_report_json():
+    prompt = f"""あなたはAI業界専門のリサーチャーです。
+今日（{TODAY_JP}・{WEEKDAY}曜日）の最新情報をweb_searchで調査し、以下のJSON形式のみで出力してください。
 
-【調査カテゴリ】
-1. Claude / Anthropic 最新情報
-2. AI業界全般ニュース（OpenAI / Google / Meta / xAI など）
-3. X（Twitter）上のAI活用事例（site:x.com で検索、日本語圏優先）
+{{"date":"{TODAY_JP}","weekday":"{WEEKDAY}","sections":[{{"title":"Claude / Anthropic","items":[{{"headline":"20文字以内のタイトル","summary":"2〜3文の具体的な概要","url":"参照URL"}}]}},{{"title":"AI業界","items":[{{"headline":"20文字以内のタイトル","summary":"2〜3文の概要","url":"参照URL"}}]}},{{"title":"X活用事例","items":[{{"headline":"20文字以内のタイトル","summary":"どんな使い方か具体的に2〜3文","url":"https://x.com/username/status/xxxxx","author":"@username"}}]}}]}}
 
-【出力ルール】
-- 合計1500文字以内
-- 絵文字不使用。【】や■を使う
-- 各カテゴリ2〜3トピック、1トピック2〜3行
-- 末尾にURL1件
-- 冒頭に日付ヘッダー
+各セクション2〜3件。X活用事例は実際のポストURLを必ず取得。日本語圏優先。"""
 
-■ AI朝刊 {TODAY}（{WEEKDAY}）
+    resp = requests.post("https://api.anthropic.com/v1/messages",
+        headers={"x-api-key":ANTHROPIC_API_KEY,"anthropic-version":"2023-06-01","content-type":"application/json"},
+        json={"model":"claude-sonnet-4-20250514","max_tokens":4096,
+              "tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],
+              "messages":[{"role":"user","content":prompt}]},
+        timeout=120)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Claude API error: {resp.status_code} {resp.text}")
+    text = "".join(b["text"] for b in resp.json().get("content",[]) if b.get("type")=="text")
+    text = re.sub(r"```json\s*","",text); text = re.sub(r"```\s*","",text); text = text.strip()
+    s,e = text.find("{"), text.rfind("}")+1
+    if s==-1 or e==0: raise RuntimeError(f"JSON not found: {text[:200]}")
+    return json.loads(text[s:e])
 
-【Claude / Anthropic】
-【AI業界】
-【X活用事例】
+def generate_html(r):
+    date_str,weekday,sections = r.get("date",TODAY_JP),r.get("weekday",WEEKDAY),r.get("sections",[])
+    icons = {"Claude / Anthropic":"A","AI業界":"AI","X活用事例":"X"}
+    shtml = ""
+    for sec in sections:
+        ihtml = ""
+        for item in sec.get("items",[]):
+            ab = f'<span class="author">{item.get("author","")}</span>' if item.get("author") else ""
+            ihtml += f'<div class="item"><div class="item-header"><span class="headline">{item.get("headline","")}</span>{ab}</div><p class="summary">{item.get("summary","")}</p><a href="{item.get("url","#")}" class="link" target="_blank">詳細を見る</a></div>'
+        shtml += f'<div class="section"><div class="section-title"><span class="icon">{icons.get(sec.get("title",""),"?")}</span>{sec.get("title","")}</div>{ihtml}</div>'
+    return f"""<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>AI朝刊 {date_str}</title><style>*{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;background:#f5f5f7;color:#1d1d1f;padding:16px;max-width:680px;margin:0 auto}}.header{{background:#1d1d1f;color:#fff;padding:20px;border-radius:12px;margin-bottom:16px}}.header .label{{font-size:11px;letter-spacing:2px;opacity:.6;text-transform:uppercase;margin-bottom:4px}}.header .date{{font-size:22px;font-weight:700}}.section{{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px}}.section-title{{font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;color:#6e6e73;display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #f0f0f0}}.icon{{background:#1d1d1f;color:#fff;font-size:10px;font-weight:800;padding:3px 6px;border-radius:4px}}.item{{padding:12px 0;border-bottom:1px solid #f5f5f7}}.item:last-child{{border-bottom:none;padding-bottom:0}}.item:first-child{{padding-top:0}}.item-header{{display:flex;align-items:center;gap:8px;margin-bottom:6px}}.headline{{font-size:15px;font-weight:600;line-height:1.3}}.author{{font-size:11px;color:#0071e3;background:#e8f0fe;padding:2px 6px;border-radius:4px;white-space:nowrap}}.summary{{font-size:13px;color:#494949;line-height:1.6;margin-bottom:8px}}.link{{font-size:12px;color:#0071e3;text-decoration:none;font-weight:500}}.footer{{text-align:center;font-size:11px;color:#aeaeb2;padding:16px 0 8px}}</style></head><body><div class="header"><div class="label">AI Daily Report</div><div class="date">{date_str}（{weekday}）</div></div>{shtml}<div class="footer">Generated by AI朝刊Bot</div></body></html>"""
 
-参照: https://...
-"""
-    response = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 4096,
-            "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}],
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=120,
-    )
-    if response.status_code != 200:
-        raise RuntimeError(f"Claude API error: {response.status_code} {response.text}")
-    data = response.json()
-    report_text = "".join(b["text"] for b in data.get("content", []) if b.get("type") == "text")
-    if not report_text.strip():
-        raise RuntimeError("Claude APIからテキストが返ってきませんでした")
-    return report_text.strip()
+def build_line_summary(r, url):
+    lines = [f"■ AI朝刊 {r.get('date',TODAY_JP)}（{r.get('weekday',WEEKDAY)}）\n"]
+    for sec in r.get("sections",[]):
+        lines.append(f"【{sec.get('title','')}】")
+        for item in sec.get("items",[]):
+            suf = f" {item['author']}" if item.get("author") else ""
+            lines.append(f"- {item.get('headline','')}{suf}")
+        lines.append("")
+    if url: lines.append(f"詳細レポート\n{url}")
+    return "\n".join(lines).strip()
 
-def send_line_message(text: str) -> None:
-    if len(text) > 4900:
-        text = text[:4900] + "\n\n...(省略)"
-    response = requests.post(
-        "https://api.line.me/v2/bot/message/push",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"},
-        json={"to": LINE_USER_ID, "messages": [{"type": "text", "text": text}]},
-        timeout=30,
-    )
-    if response.status_code != 200:
-        raise RuntimeError(f"LINE API error: {response.status_code} {response.text}")
+def send_line(text):
+    if len(text)>4900: text=text[:4900]+"\n...(省略)"
+    r = requests.post("https://api.line.me/v2/bot/message/push",
+        headers={"Content-Type":"application/json","Authorization":f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"},
+        json={"to":LINE_USER_ID,"messages":[{"type":"text","text":text}]},timeout=30)
+    if r.status_code!=200: raise RuntimeError(f"LINE error: {r.status_code} {r.text}")
     print("LINE送信成功")
 
-def send_line_error(error_msg: str) -> None:
+if __name__=="__main__":
+    print(f"開始: {TODAY}")
     try:
-        send_line_message(f"■ AI朝刊レポート 生成エラー\n{TODAY}\n\n{error_msg}")
-    except Exception:
-        pass
-
-if __name__ == "__main__":
-    print(f"レポート生成開始: {TODAY}")
-    try:
-        report = generate_report()
-        print(report)
-        send_line_message(report)
+        report = fetch_report_json()
+        print(json.dumps(report,ensure_ascii=False,indent=2))
+        html = generate_html(report)
+        os.makedirs("docs",exist_ok=True)
+        with open(f"docs/{TODAY}.html","w",encoding="utf-8") as f: f.write(html)
+        with open("docs/index.html","w",encoding="utf-8") as f:
+            f.write(f'<!DOCTYPE html><html><head><meta charset="UTF-8"><meta http-equiv="refresh" content="0;url={TODAY}.html"></head><body></body></html>')
+        print(f"HTML生成: docs/{TODAY}.html")
+        page_url = f"{GITHUB_PAGES_BASE}/{TODAY}.html" if GITHUB_PAGES_BASE else ""
+        summary = build_line_summary(report, page_url)
+        print(summary)
+        send_line(summary)
         print("完了")
     except Exception as e:
-        send_line_error(str(e))
+        print(f"ERROR: {e}")
+        try: send_line(f"■ AI朝刊エラー\n{TODAY_JP}\n\n{e}")
+        except: pass
         raise
